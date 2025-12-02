@@ -6,7 +6,9 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 🔐 VAPID keys desde variables de entorno
+// ======================================================
+//  VAPID KEYS DESDE VARIABLES DE ENTORNO
+// ======================================================
 const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY;
 const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY;
 const WEB_PUSH_EMAIL = process.env.WEB_PUSH_EMAIL || "mailto:tu-correo@example.com";
@@ -21,13 +23,14 @@ webpush.setVapidDetails(
   VAPID_PRIVATE_KEY
 );
 
-// Guardamos suscripciones en memoria (por dueño)
+// ======================================================
+//  SUSCRIPCIONES PUSH (MARCELO / ELI)
+// ======================================================
 const subscriptionsByOwner = {
   Marcelo: new Map(),
   Eli: new Map()
 };
 
-// 👉 POST /subscribe  (registrar dispositivo)
 app.post("/subscribe", (req, res) => {
   try {
     const { owner, subscription } = req.body || {};
@@ -35,7 +38,6 @@ app.post("/subscribe", (req, res) => {
       return res.status(400).json({ error: "Datos inválidos (owner/subscription)" });
     }
 
-    // usamos el endpoint como llave
     subscriptionsByOwner[owner].set(subscription.endpoint, subscription);
     console.log(`✅ Guardada suscripción para: ${owner}`);
     res.json({ ok: true });
@@ -45,7 +47,6 @@ app.post("/subscribe", (req, res) => {
   }
 });
 
-// 👉 POST /notify  (enviar notificación a uno o ambos)
 app.post("/notify", async (req, res) => {
   try {
     const { title, body, targets } = req.body || {};
@@ -54,7 +55,6 @@ app.post("/notify", async (req, res) => {
       return res.status(400).json({ error: "Datos inválidos (title/body/targets)" });
     }
 
-    // Juntamos subs de los targets (Marcelo/Eli)
     const subsSet = new Set();
     targets.forEach((owner) => {
       const key = owner === "Eli" ? "Eli" : "Marcelo";
@@ -70,7 +70,7 @@ app.post("/notify", async (req, res) => {
       Array.from(subsSet).map((sub) => webpush.sendNotification(sub, payload))
     );
 
-    console.log("Resultados push:", results.map(r => r.status));
+    console.log("Resultados push:", results.map((r) => r.status));
     res.json({ ok: true, sent: subsSet.size });
   } catch (err) {
     console.error("Error en /notify:", err);
@@ -78,6 +78,87 @@ app.post("/notify", async (req, res) => {
   }
 });
 
+// ======================================================
+//  TAREAS COMPARTIDAS EN MEMORIA
+// ======================================================
+// Nota: esto se pierde si Render reinicia el servicio.
+// Para uso de ustedes 2 está bien por ahora.
+// Luego se puede pasar a BD si la queremos ultra permanente.
+let tasks = [];
+
+// GET /tasks - devuelve todas las tareas
+app.get("/tasks", (req, res) => {
+  res.json({ tasks });
+});
+
+// POST /tasks - crea una nueva tarea
+app.post("/tasks", (req, res) => {
+  try {
+    const { title, owner, date } = req.body || {};
+    if (!title || !owner) {
+      return res.status(400).json({ error: "Faltan datos (title/owner)" });
+    }
+
+    const newTask = {
+      id: Date.now().toString(),
+      title,
+      owner,
+      date: date || "",
+      done: false
+    };
+
+    tasks.push(newTask);
+    console.log("📝 Nueva tarea:", newTask);
+    res.json(newTask);
+  } catch (err) {
+    console.error("Error en POST /tasks:", err);
+    res.status(500).json({ error: "Error interno al crear tarea" });
+  }
+});
+
+// PATCH /tasks/:id - actualizar estado done
+app.patch("/tasks/:id", (req, res) => {
+  try {
+    const { id } = req.params;
+    const { done } = req.body || {};
+
+    const idx = tasks.findIndex((t) => t.id === id);
+    if (idx === -1) {
+      return res.status(404).json({ error: "Tarea no encontrada" });
+    }
+
+    if (typeof done === "boolean") {
+      tasks[idx].done = done;
+    }
+
+    res.json(tasks[idx]);
+  } catch (err) {
+    console.error("Error en PATCH /tasks/:id:", err);
+    res.status(500).json({ error: "Error interno al actualizar tarea" });
+  }
+});
+
+// DELETE /tasks/:id - borrar tarea
+app.delete("/tasks/:id", (req, res) => {
+  try {
+    const { id } = req.params;
+    const before = tasks.length;
+    tasks = tasks.filter((t) => t.id !== id);
+
+    if (tasks.length === before) {
+      return res.status(404).json({ error: "Tarea no encontrada" });
+    }
+
+    res.json({ ok: true });
+  } catch (err) {
+    console.error("Error en DELETE /tasks/:id:", err);
+    res.status(500).json({ error: "Error interno al borrar tarea" });
+  }
+});
+
+// ======================================================
+//  INICIO DEL SERVIDOR
+// ======================================================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log("🚀 Agenda backend escuchando en puerto", PORT);
