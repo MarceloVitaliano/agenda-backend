@@ -1,65 +1,156 @@
+// server.js
 const express = require('express');
 const cors = require('cors');
+const webpush = require('web-push');
 
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// 🔴 Aquí guardaremos los pendientes por mientras (en memoria)
-let pendientes = [];
+// =========================
+// DATA EN MEMORIA (TEMPORAL)
+// =========================
+let tasks = [];          // { id, title, owner, date, done }
+let subscriptions = [];  // { owner, subscription }
 
-// Probar que el backend vive
+// =========================
+// VAPID (WEB PUSH)
+// =========================
+// Idealmente pon estas claves en variables de entorno en Render:
+// VAPID_PUBLIC_KEY y VAPID_PRIVATE_KEY
+const VAPID_PUBLIC_KEY = process.env.VAPID_PUBLIC_KEY || "BKAvhEy5n_cgZs2_8-jzvTuR_NT5Vm5BHdZOfqSJPkdjnuGPCNmptAmGoyRiWAj-t3TXpcf_RCW_hhLPfTUadSs";
+const VAPID_PRIVATE_KEY = process.env.VAPID_PRIVATE_KEY || "PON_AQUI_TU_VAPID_PRIVATE_KEY_REAL"; // cámbialo en Render
+
+webpush.setVapidDetails(
+  'mailto:tu-correo@example.com', // puedes poner tu correo real
+  VAPID_PUBLIC_KEY,
+  VAPID_PRIVATE_KEY
+);
+
+// =========================
+// ENDPOINT DE PRUEBA
+// =========================
 app.get('/', (req, res) => {
   res.send('Backend de Agenda funcionando ✅');
 });
 
-// Obtener todos los pendientes
-app.get('/pendientes', (req, res) => {
-  res.json(pendientes);
+// =========================
+// ENDPOINTS DE TAREAS
+// =========================
+
+// GET /tasks → devuelve todas las tareas
+app.get('/tasks', (req, res) => {
+  res.json({ tasks });
 });
 
-// Crear un nuevo pendiente
-app.post('/pendientes', (req, res) => {
-  const { descripcion, deQuien, fechaLimite, creadoPor } = req.body;
+// POST /tasks → crea una nueva tarea
+app.post('/tasks', (req, res) => {
+  const { title, owner, date } = req.body;
 
-  if (!descripcion || !deQuien || !creadoPor) {
-    return res.status(400).json({ error: 'Faltan campos' });
+  if (!title || !owner) {
+    return res.status(400).json({ error: 'Faltan campos (title u owner)' });
   }
 
-  const nuevo = {
+  const nuevaTarea = {
     id: Date.now().toString(), // id sencillo
-    descripcion,
-    deQuien,
-    fechaLimite: fechaLimite || null,
-    creadoPor,
-    creadoEn: new Date().toISOString(),
-    completado: false
+    title,
+    owner,                     // "Marcelo" | "Eli" | "Ambos"
+    date: date || null,        // string tipo "2025-12-03" o null
+    done: false
   };
 
-  pendientes.push(nuevo);
-  res.status(201).json(nuevo);
+  tasks.push(nuevaTarea);
+  res.status(201).json(nuevaTarea);
 });
 
-// Marcar como completado o editar algo
-app.patch('/pendientes/:id', (req, res) => {
+// PATCH /tasks/:id → actualizar una tarea (ej. done)
+app.patch('/tasks/:id', (req, res) => {
   const { id } = req.params;
-  const cambios = req.body;
+  const cambios = req.body; // por ahora solo esperamos { done: true/false }
 
-  const idx = pendientes.findIndex(p => p.id === id);
-  if (idx === -1) return res.status(404).json({ error: 'No encontrado' });
+  const idx = tasks.findIndex(t => t.id === id);
+  if (idx === -1) {
+    return res.status(404).json({ error: 'Tarea no encontrada' });
+  }
 
-  pendientes[idx] = { ...pendientes[idx], ...cambios };
-  res.json(pendientes[idx]);
+  tasks[idx] = { ...tasks[idx], ...cambios };
+  res.json(tasks[idx]);
 });
 
-// Borrar pendiente
-app.delete('/pendientes/:id', (req, res) => {
+// DELETE /tasks/:id → borrar una tarea
+app.delete('/tasks/:id', (req, res) => {
   const { id } = req.params;
-  pendientes = pendientes.filter(p => p.id !== id);
+  const existe = tasks.some(t => t.id === id);
+
+  if (!existe) {
+    return res.status(404).json({ error: 'Tarea no encontrada' });
+  }
+
+  tasks = tasks.filter(t => t.id !== id);
   res.status(204).send();
 });
 
-// Puerto para Render
+// =========================
+// ENDPOINTS DE NOTIFICACIONES
+// =========================
+
+// POST /subscribe → guardar suscripción de un dispositivo
+// body: { owner: "Marcelo" | "Eli", subscription: {...} }
+app.post('/subscribe', (req, res) => {
+  const { owner, subscription } = req.body;
+
+  if (!owner || !subscription) {
+    return res.status(400).json({ error: 'Faltan owner o subscription' });
+  }
+
+  // Evitar duplicados por endpoint
+  const endpoint = subscription.endpoint;
+  subscriptions = subscriptions.filter(sub => sub.subscription.endpoint !== endpoint);
+
+  subscriptions.push({ owner, subscription });
+
+  console.log(`Nueva suscripción de ${owner}`);
+  res.status(201).json({ message: 'Suscripción registrada' });
+});
+
+// POST /notify → enviar notificaciones a uno o varios owners
+// body: { title, body, targets: ["Marcelo"] o ["Eli"] o ["Marcelo","Eli"] }
+app.post('/notify', async (req, res) => {
+  const { title, body, targets } = req.body;
+
+  if (!title || !body || !Array.isArray(targets)) {
+    return res.status(400).json({ error: 'Faltan datos para notificar' });
+  }
+
+  const subsObjetivo = subscriptions.filter(sub =>
+    targets.includes(sub.owner)
+  );
+
+  const payload = JSON.stringify({
+    title,
+    body
+  });
+
+  const resultados = [];
+
+  await Promise.all(
+    subsObjetivo.map(async (sub) => {
+      try {
+        await webpush.sendNotification(sub.subscription, payload);
+        resultados.push({ owner: sub.owner, ok: true });
+      } catch (err) {
+        console.error('Error enviando notificación a', sub.owner, err);
+        resultados.push({ owner: sub.owner, ok: false, error: err.message });
+      }
+    })
+  );
+
+  res.json({ sent: resultados });
+});
+
+// =========================
+// INICIAR SERVIDOR
+// =========================
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log('Servidor escuchando en el puerto ' + PORT);
